@@ -6,6 +6,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Reflection;
+using Microsoft.Win32;
 using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -14,11 +15,17 @@ using System.Windows.Forms;
 internal static class Launcher
 {
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         try
         {
             string appFolder = AppDomain.CurrentDomain.BaseDirectory;
+            RegisterUpdateProtocol();
+            if (args != null && Array.IndexOf(args, "--check-update") >= 0)
+            {
+                TryLaunchUpdate(appFolder, true, true);
+                return 0;
+            }
             if (TryLaunchUpdate(appFolder)) return 0;
 
             string imageFolder = Path.Combine(appFolder, "images");
@@ -91,10 +98,34 @@ internal static class Launcher
         return null;
     }
 
-    private static bool TryLaunchUpdate(string appFolder)
+    private static void RegisterUpdateProtocol()
+    {
+        try
+        {
+            string executable = Assembly.GetExecutingAssembly().Location;
+            using (RegistryKey protocol = Registry.CurrentUser.CreateSubKey(@"Software\Classes\fushengyicheck"))
+            {
+                if (protocol == null) return;
+                protocol.SetValue("", "URL:浮生弈检查更新");
+                protocol.SetValue("URL Protocol", "", RegistryValueKind.String);
+            }
+            using (RegistryKey command = Registry.CurrentUser.CreateSubKey(@"Software\Classes\fushengyicheck\shell\open\command"))
+            {
+                if (command == null) return;
+                command.SetValue("", "\"" + executable + "\" --check-update \"%1\"", RegistryValueKind.String);
+            }
+        }
+        catch { }
+    }
+
+    private static bool TryLaunchUpdate(string appFolder, bool forceCheck = false, bool showLatest = false)
     {
         string configPath = Path.Combine(appFolder, "update-config.json");
-        if (!File.Exists(configPath)) return false;
+        if (!File.Exists(configPath))
+        {
+            if (showLatest) MessageBox.Show("更新配置不存在，请重新下载完整版本。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
 
         string owner;
         string repository;
@@ -109,7 +140,11 @@ internal static class Launcher
         }
         catch { return false; }
 
-        if (!IsGitHubName(owner) || !IsGitHubName(repository)) return false;
+        if (!IsGitHubName(owner) || !IsGitHubName(repository))
+        {
+            if (showLatest) MessageBox.Show("更新源配置无效，请重新下载完整版本。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
         if (String.IsNullOrWhiteSpace(assetName)) assetName = "fushengyi-win-x64.zip";
 
         string localVersionText = ReadVersionText(appFolder);
@@ -125,17 +160,19 @@ internal static class Launcher
             return true;
         }
 
-        string checkPath = Path.Combine(localData, "last-update-check.txt");
-        try
-        {
-            DateTime previousCheck;
-            if (DateTime.TryParse(File.ReadAllText(checkPath), out previousCheck) &&
-                DateTime.UtcNow - previousCheck.ToUniversalTime() < TimeSpan.FromHours(8))
-                return false;
-        }
-        catch { }
-
         Directory.CreateDirectory(localData);
+        string checkPath = Path.Combine(localData, "last-update-check.txt");
+        if (!forceCheck)
+        {
+            try
+            {
+                DateTime previousCheck;
+                if (DateTime.TryParse(File.ReadAllText(checkPath), out previousCheck) &&
+                    DateTime.UtcNow - previousCheck.ToUniversalTime() < TimeSpan.FromHours(8))
+                    return false;
+            }
+            catch { }
+        }
         try { File.WriteAllText(checkPath, DateTime.UtcNow.ToString("o")); }
         catch { }
 
@@ -146,11 +183,25 @@ internal static class Launcher
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             release = serializer.Deserialize<Dictionary<string, object>>(RequestText(apiUrl, 5000));
         }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            if (showLatest)
+                MessageBox.Show("暂时无法连接更新服务器，请检查网络后重试。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
 
         string tag = ReadJsonString(release, "tag_name");
         Version remoteVersion;
-        if (!Version.TryParse(tag.TrimStart('v', 'V'), out remoteVersion) || remoteVersion <= localVersion) return false;
+        if (!Version.TryParse(tag.TrimStart('v', 'V'), out remoteVersion))
+        {
+            if (showLatest) MessageBox.Show("暂时无法识别服务器上的版本号。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+        if (remoteVersion <= localVersion)
+        {
+            if (showLatest) MessageBox.Show("当前已经是最新版本（v" + localVersion + "）。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
 
         Dictionary<string, object> matchingAsset = null;
         object assetsValue;
@@ -170,11 +221,19 @@ internal static class Launcher
                 }
             }
         }
-        if (matchingAsset == null) return false;
+        if (matchingAsset == null)
+        {
+            if (showLatest) MessageBox.Show("发现新版本 v" + remoteVersion + "，但安装包暂不可用。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
 
         string downloadUrl = ReadJsonString(matchingAsset, "browser_download_url");
         string digest = ReadJsonString(matchingAsset, "digest");
-        if (String.IsNullOrWhiteSpace(downloadUrl) || !downloadUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase)) return false;
+        if (String.IsNullOrWhiteSpace(downloadUrl) || !downloadUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (showLatest) MessageBox.Show("新版本下载地址无效，请稍后重试。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
 
         string versionName = remoteVersion.ToString();
         string finalFolder = Path.Combine(versionsFolder, "v" + versionName);

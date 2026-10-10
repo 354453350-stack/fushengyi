@@ -78,6 +78,9 @@
     button:active:not(:disabled) { transform: translateY(1px); }
     button:focus-visible { outline: 3px solid rgba(139,74,58,.35); outline-offset: 4px; }
     button:disabled { cursor: default; opacity: .58; }
+    .actions { display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap; }
+    button.secondary { min-height: 46px; padding: 10px 20px; border-color: var(--line); color: var(--rust-dark); background: rgba(255,255,255,.36); box-shadow: none; font-size: 15px; letter-spacing: .08em; }
+    button.secondary:hover:not(:disabled) { box-shadow: 0 7px 14px rgba(92,46,34,.15); }
     .status { min-height: 22px; margin: 12px 0 0; color: var(--muted); font-size: 13px; letter-spacing: .08em; }
     .status.error { color: var(--rust-dark); }
     .footer { margin-top: 27px; color: var(--rust); opacity: .65; font-size: 18px; }
@@ -105,7 +108,10 @@
       </div>
       <div class="base" aria-hidden="true"><span></span><span></span></div>
     </section>
-    <button id="draw" type="button">凿碑 · 现相</button>
+    <div class="actions">
+      <button id="draw" type="button">凿碑 · 现相</button>
+      <button id="check-update" class="secondary" type="button">检查更新</button>
+    </div>
     <p class="status" id="status" aria-live="polite"></p>
     <div class="footer ornament" aria-hidden="true">⌁</div>
   </main>
@@ -113,10 +119,23 @@
     (() => {
       const images = __IMAGE_FILES_JSON__;
       const button = document.getElementById('draw');
+      const updateButton = document.getElementById('check-update');
       const image = document.getElementById('portrait');
       const placeholder = document.getElementById('placeholder');
       const status = document.getElementById('status');
       let previous = -1;
+
+      updateButton.addEventListener('click', () => {
+        updateButton.disabled = true;
+        status.classList.remove('error');
+        status.textContent = '正在检查更新，请留意更新提示窗口。';
+        window.location.href = 'fushengyicheck://check-update';
+        window.setTimeout(() => {
+          updateButton.disabled = false;
+          if (status.textContent === '正在检查更新，请留意更新提示窗口。')
+            status.textContent = '如果没有弹出窗口，请允许打开浮生弈更新程序。';
+        }, 4000);
+      });
 
       if (images.length === 0) {
         button.disabled = true;
