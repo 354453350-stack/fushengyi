@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -176,12 +175,10 @@ internal static class Launcher
         try { File.WriteAllText(checkPath, DateTime.UtcNow.ToString("o")); }
         catch { }
 
-        Dictionary<string, object> release;
+        string tag;
         try
         {
-            string apiUrl = "https://api.github.com/repos/" + owner + "/" + repository + "/releases/latest";
-            JavaScriptSerializer serializer = new JavaScriptSerializer();
-            release = serializer.Deserialize<Dictionary<string, object>>(RequestText(apiUrl, 5000));
+            tag = RequestLatestReleaseTag(owner, repository, 10000);
         }
         catch (Exception ex)
         {
@@ -190,7 +187,6 @@ internal static class Launcher
             return false;
         }
 
-        string tag = ReadJsonString(release, "tag_name");
         Version remoteVersion;
         if (!Version.TryParse(tag.TrimStart('v', 'V'), out remoteVersion))
         {
@@ -203,35 +199,17 @@ internal static class Launcher
             return false;
         }
 
-        Dictionary<string, object> matchingAsset = null;
-        object assetsValue;
-        if (release.TryGetValue("assets", out assetsValue))
+        string releaseBase = "https://github.com/" + owner + "/" + repository + "/releases/download/" + Uri.EscapeDataString(tag) + "/";
+        string downloadUrl = releaseBase + Uri.EscapeDataString(assetName);
+        string digest;
+        try
         {
-            IEnumerable assets = assetsValue as IEnumerable;
-            if (assets != null)
-            {
-                foreach (object item in assets)
-                {
-                    Dictionary<string, object> asset = item as Dictionary<string, object>;
-                    if (asset != null && String.Equals(ReadJsonString(asset, "name"), assetName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        matchingAsset = asset;
-                        break;
-                    }
-                }
-            }
+            digest = RequestReleaseDigest(downloadUrl + ".sha256", assetName, 10000);
         }
-        if (matchingAsset == null)
+        catch (Exception ex)
         {
-            if (showLatest) MessageBox.Show("发现新版本 v" + remoteVersion + "，但安装包暂不可用。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return false;
-        }
-
-        string downloadUrl = ReadJsonString(matchingAsset, "browser_download_url");
-        string digest = ReadJsonString(matchingAsset, "digest");
-        if (String.IsNullOrWhiteSpace(downloadUrl) || !downloadUrl.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase))
-        {
-            if (showLatest) MessageBox.Show("新版本下载地址无效，请稍后重试。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (showLatest)
+                MessageBox.Show("发现新版本 v" + remoteVersion + "，但暂时无法读取安装包校验文件。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
 
@@ -334,13 +312,69 @@ internal static class Launcher
         ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
         HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
         request.Method = "GET";
-        request.Accept = "application/vnd.github+json";
+        request.Accept = "text/plain, text/html, */*";
         request.UserAgent = "FuShengYi-Updater/1.0";
         request.Timeout = timeout;
         request.ReadWriteTimeout = timeout;
         using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
         using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
             return reader.ReadToEnd();
+    }
+
+    private static string RequestLatestReleaseTag(string owner, string repository, int timeout)
+    {
+        ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
+        string url = "https://github.com/" + owner + "/" + repository + "/releases/latest";
+        HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+        request.Method = "GET";
+        request.Accept = "text/html";
+        request.UserAgent = "FuShengYi-Updater/1.0";
+        request.Timeout = timeout;
+        request.ReadWriteTimeout = timeout;
+        using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+        {
+            Uri finalUri = response.ResponseUri;
+            if (!String.Equals(finalUri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("GitHub 返回的更新页面地址无效。");
+
+            string[] segments = finalUri.AbsolutePath.Split(new char[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length != 5 ||
+                !String.Equals(segments[0], owner, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(segments[1], repository, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(segments[2], "releases", StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(segments[3], "tag", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("GitHub 没有返回有效的最新 Release 页面。");
+
+            return Uri.UnescapeDataString(segments[4]);
+        }
+    }
+
+    private static string RequestReleaseDigest(string url, string assetName, int timeout)
+    {
+        if (String.IsNullOrWhiteSpace(url) || !url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("新版本校验文件地址无效。");
+
+        string[] lines = RequestText(url, timeout).Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        if (lines.Length != 1)
+            throw new InvalidDataException("新版本校验文件格式无效。");
+
+        string line = lines[0].Trim();
+        if (line.Length < 64)
+            throw new InvalidDataException("新版本校验文件内容不完整。");
+
+        string hash = line.Substring(0, 64);
+        for (int i = 0; i < hash.Length; i++)
+        {
+            char ch = hash[i];
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')))
+                throw new InvalidDataException("新版本校验文件中的 SHA-256 格式无效。");
+        }
+
+        string declaredName = line.Substring(64).Trim().TrimStart('*').Trim();
+        if (declaredName.Length > 0 && !String.Equals(declaredName, assetName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("新版本校验文件对应的文件名不一致。");
+
+        return "sha256:" + hash;
     }
 
     private static void DownloadFile(string url, string destination, int timeout)
