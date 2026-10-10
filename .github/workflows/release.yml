@@ -1,0 +1,61 @@
+name: Publish Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example v1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Build Windows package
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            $tag = $env:INPUT_VERSION
+          }
+          $version = $tag -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Use a release tag like v1.0.0.'
+          }
+          $repositoryName = $env:GITHUB_REPOSITORY.Split('/')[1]
+          ./package-release.ps1 -Version $version -GitHubOwner $env:REPOSITORY_OWNER -GitHubRepository $repositoryName
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            $tag = $env:INPUT_VERSION
+          }
+          $version = $tag -replace '^v', ''
+          $releaseDirectory = "dist/release-v$version"
+          gh release create $tag `
+            "$releaseDirectory/fushengyi-win-x64.zip" `
+            "$releaseDirectory/fushengyi-win-x64.zip.sha256" `
+            --generate-notes `
+            --title "浮生弈 $tag" `
+            --repo $env:GITHUB_REPOSITORY

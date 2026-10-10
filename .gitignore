@@ -1,0 +1,6 @@
+/dist/
+/publish/
+/浮生弈.exe
+/update-config.json
+*.user
+*.suo

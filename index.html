@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>浮生弈 · 朽碑撰新篇</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f2e8d5;
+      --stone: #dfd5bc;
+      --ink: #302f2b;
+      --muted: #777064;
+      --rust: #8b4a3a;
+      --rust-dark: #653528;
+      --line: rgba(139, 74, 58, .35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      padding: clamp(18px, 4vw, 42px);
+      color: var(--ink);
+      background:
+        radial-gradient(ellipse at 20% 12%, rgba(139,74,58,.09), transparent 34%),
+        radial-gradient(ellipse at 85% 82%, rgba(94,107,74,.11), transparent 38%),
+        linear-gradient(180deg, #f6eedf, var(--paper));
+      font-family: "Microsoft YaHei", "Noto Serif CJK SC", "SimSun", serif;
+    }
+    main { width: min(100%, 680px); text-align: center; animation: enter .7s ease-out both; }
+    .ornament { display: flex; align-items: center; gap: 14px; color: var(--rust); opacity: .72; }
+    .ornament::before, .ornament::after { content: ""; height: 1px; flex: 1; background: linear-gradient(90deg, transparent, var(--line), transparent); }
+    .seal { display: inline-grid; place-items: center; width: 35px; height: 35px; border: 1px solid currentColor; outline: 1px solid rgba(139,74,58,.35); outline-offset: 3px; font-size: 20px; transform: rotate(8deg); }
+    h1 { margin: 24px 0 2px; font-size: clamp(42px, 8vw, 68px); font-weight: 500; letter-spacing: .18em; line-height: 1.2; }
+    h1 span { color: var(--rust); font-size: .52em; vertical-align: .2em; letter-spacing: .04em; }
+    .subtitle { margin: 0; font-size: clamp(21px, 4vw, 31px); letter-spacing: .24em; }
+    .motto { margin: 12px 0 26px; color: var(--muted); font-size: 14px; letter-spacing: .22em; }
+    .frame {
+      position: relative;
+      width: min(100%, 410px);
+      aspect-ratio: 1;
+      margin: 0 auto 25px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: linear-gradient(135deg, #e9e1d0, #d4c8a8);
+      box-shadow: 0 18px 38px rgba(47,47,45,.22), inset 0 0 30px rgba(255,250,240,.55);
+    }
+    .frame::before { content: ""; position: absolute; inset: 6px; border: 1px dashed rgba(139,74,58,.23); pointer-events: none; }
+    .well { position: relative; width: 100%; height: 100%; display: grid; place-items: center; overflow: hidden; border: 1px solid rgba(139,74,58,.25); background: rgba(255,255,255,.34); box-shadow: inset 0 3px 16px rgba(0,0,0,.12); }
+    #portrait { display: none; width: 100%; height: 100%; object-fit: contain; }
+    #portrait.visible { display: block; animation: reveal .55s cubic-bezier(.2,.8,.25,1) both; }
+    .placeholder { padding: 24px; color: #82796a; }
+    .monument { display: block; margin-bottom: 12px; color: var(--rust); opacity: .65; font-size: 50px; line-height: 1; }
+    .placeholder p { margin: 0; font-size: 15px; letter-spacing: .12em; }
+    .base { display: flex; align-items: center; gap: 9px; margin: 10px 9px 0; color: var(--line); }
+    .base::before, .base::after { content: ""; flex: 1; height: 1px; background: currentColor; }
+    .base span { width: 11px; height: 11px; border: 1px solid currentColor; transform: rotate(45deg); }
+    button {
+      min-height: 54px;
+      padding: 12px 30px;
+      border: 1px solid var(--rust-dark);
+      border-radius: 99px;
+      color: #fbf4e4;
+      background: linear-gradient(#a05a48, #753e30);
+      box-shadow: 0 9px 18px rgba(92,46,34,.28), inset 0 1px rgba(255,255,255,.2);
+      font: inherit;
+      font-size: 20px;
+      letter-spacing: .16em;
+      cursor: pointer;
+      transition: transform .18s ease, box-shadow .18s ease, filter .18s ease;
+    }
+    button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 13px 22px rgba(92,46,34,.34); filter: brightness(1.08); }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:focus-visible { outline: 3px solid rgba(139,74,58,.35); outline-offset: 4px; }
+    button:disabled { cursor: default; opacity: .58; }
+    .status { min-height: 22px; margin: 12px 0 0; color: var(--muted); font-size: 13px; letter-spacing: .08em; }
+    .status.error { color: var(--rust-dark); }
+    .footer { margin-top: 27px; color: var(--rust); opacity: .65; font-size: 18px; }
+    @keyframes enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes reveal { from { opacity: 0; transform: scale(.96); filter: blur(3px); } to { opacity: 1; transform: scale(1); filter: blur(0); } }
+    @media (max-height: 760px) { body { padding-block: 18px; } .motto { margin-bottom: 16px; } .frame { width: min(52vh, 360px, 100%); margin-bottom: 17px; } .footer { margin-top: 18px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="ornament" aria-hidden="true"><span class="seal">弈</span></div>
+    <header>
+      <h1>浮生弈<span>#3</span></h1>
+      <p class="subtitle">「朽碑撰新篇」</p>
+      <p class="motto">凿石寻旧迹 · 落笔起新章</p>
+    </header>
+    <section class="frame" aria-label="随机抽取的图片">
+      <div class="well">
+        <div class="placeholder" id="placeholder" role="status">
+          <span class="monument" aria-hidden="true">▥</span>
+          <p>碑文待刻 · 静候机缘</p>
+        </div>
+        <img id="portrait" alt="抽取的干员图片">
+      </div>
+      <div class="base" aria-hidden="true"><span></span><span></span></div>
+    </section>
+    <button id="draw" type="button">凿碑 · 现相</button>
+    <p class="status" id="status" aria-live="polite"></p>
+    <div class="footer ornament" aria-hidden="true">⌁</div>
+  </main>
+  <script>
+    (() => {
+      const images = __IMAGE_FILES_JSON__;
+      const button = document.getElementById('draw');
+      const image = document.getElementById('portrait');
+      const placeholder = document.getElementById('placeholder');
+      const status = document.getElementById('status');
+      let previous = -1;
+
+      if (images.length === 0) {
+        button.disabled = true;
+        placeholder.querySelector('p').textContent = '碑林空寂 · 尚未收录刻像';
+        status.classList.add('error');
+        status.textContent = '把 PNG、JPG、GIF 或 WebP 图片放进程序旁的 images 文件夹，再重新打开。';
+        return;
+      }
+      status.textContent = `碑林中共收录 ${images.length} 幅刻像`;
+
+      button.addEventListener('click', () => {
+        let index = Math.floor(Math.random() * images.length);
+        if (images.length > 1 && index === previous) index = (index + 1 + Math.floor(Math.random() * (images.length - 1))) % images.length;
+        previous = index;
+        const next = new Image();
+        next.onload = () => {
+          image.src = next.src;
+          image.classList.remove('visible');
+          void image.offsetWidth;
+          image.classList.add('visible');
+          image.style.display = 'block';
+          placeholder.hidden = true;
+          status.textContent = `已抽取第 ${index + 1} 幅 · 共 ${images.length} 幅刻像`;
+        };
+        next.onerror = () => {
+          status.classList.add('error');
+          status.textContent = '这幅图片暂时无法读取，请检查 images 文件夹中的文件。';
+        };
+        next.src = images[index];
+      });
+    })();
+  </script>
+</body>
+</html>
