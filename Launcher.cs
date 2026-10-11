@@ -153,7 +153,10 @@ internal static class Launcher
         string localData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FuShengYi");
         string versionsFolder = Path.Combine(localData, "versions");
         string cachedExecutable = FindCachedVersion(versionsFolder, localVersion);
-        if (cachedExecutable != null)
+        // A manual check must still contact GitHub. Otherwise an older launcher
+        // with a cached version would keep opening that cache and never discover
+        // a newer release.
+        if (cachedExecutable != null && !forceCheck)
         {
             StartExecutable(cachedExecutable);
             return true;
