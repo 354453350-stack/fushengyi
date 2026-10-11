@@ -45,6 +45,7 @@ $compilerArgs = @(
     "/out:$exePath",
     '/reference:System.Windows.Forms.dll',
     '/reference:System.Web.Extensions.dll',
+    '/reference:System.Core.dll',
     '/reference:System.IO.Compression.dll',
     '/reference:System.IO.Compression.FileSystem.dll',
     $resourceArgument,
@@ -60,6 +61,13 @@ $imageCount = @(Get-ChildItem -LiteralPath (Join-Path $stage 'images') -File | W
 if ($imageCount -eq 0) {
     throw 'No supported images were found in the images folder.'
 }
+$managedImageNames = @(Get-ChildItem -LiteralPath (Join-Path $stage 'images') -File | ForEach-Object { $_.Name })
+$retiredImagesPath = Join-Path $projectRoot 'retired-images.txt'
+if (Test-Path -LiteralPath $retiredImagesPath) {
+    $managedImageNames += Get-Content -LiteralPath $retiredImagesPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+}
+$managedImageNames = @($managedImageNames | Sort-Object -Unique)
+Set-Content -LiteralPath (Join-Path $stage 'managed-images.txt') -Value $managedImageNames -Encoding utf8NoBOM
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stage
 Set-Content -LiteralPath (Join-Path $stage 'version.txt') -Value $Version -Encoding utf8NoBOM
 $updateConfig = [ordered]@{

@@ -13,14 +13,23 @@ using System.Windows.Forms;
 
 internal static class Launcher
 {
+    private const string AppName = "FuShengYi";
+
     [STAThread]
     private static int Main(string[] args)
     {
         try
         {
-            string appFolder = AppDomain.CurrentDomain.BaseDirectory;
-            RegisterUpdateProtocol();
-            if (args != null && Array.IndexOf(args, "--check-update") >= 0)
+            if (args != null && args.Length > 0 && args[0] == "--apply-update")
+                return ApplyStagedUpdate(args);
+
+            bool manualCheck = HasArgument(args, "--check-update");
+            string sourceFolder = AppDomain.CurrentDomain.BaseDirectory;
+            string appFolder;
+            if (!EnsureCanonicalInstall(sourceFolder, manualCheck, out appFolder)) return 0;
+
+            RegisterUpdateProtocol(Path.Combine(appFolder, "浮生弈.exe"));
+            if (manualCheck)
             {
                 TryLaunchUpdate(appFolder, true, true);
                 return 0;
@@ -29,8 +38,10 @@ internal static class Launcher
 
             string imageFolder = Path.Combine(appFolder, "images");
             Directory.CreateDirectory(imageFolder);
-
-            string[] imagePaths = Directory.GetFiles(imageFolder);
+            List<string> imagePaths = new List<string>();
+            HashSet<string> imageNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddImageFiles(imageFolder, imagePaths, imageNames);
+            AddImageFiles(GetUserImagesFolder(), imagePaths, imageNames);
             StringBuilder json = new StringBuilder("[");
             bool first = true;
             foreach (string file in imagePaths)
@@ -97,11 +108,10 @@ internal static class Launcher
         return null;
     }
 
-    private static void RegisterUpdateProtocol()
+    private static void RegisterUpdateProtocol(string executable)
     {
         try
         {
-            string executable = Assembly.GetExecutingAssembly().Location;
             using (RegistryKey protocol = Registry.CurrentUser.CreateSubKey(@"Software\Classes\fushengyicheck"))
             {
                 if (protocol == null) return;
@@ -150,16 +160,12 @@ internal static class Launcher
         Version localVersion;
         if (!Version.TryParse(localVersionText, out localVersion)) localVersion = new Version(1, 0, 0);
 
-        string localData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FuShengYi");
-        string versionsFolder = Path.Combine(localData, "versions");
-        string cachedExecutable = FindCachedVersion(versionsFolder, localVersion);
-        // A manual check must still contact GitHub. Otherwise an older launcher
-        // with a cached version would keep opening that cache and never discover
-        // a newer release.
-        if (cachedExecutable != null && !forceCheck)
+        string localData = GetLocalDataFolder();
+        string installFolder = GetInstallFolder();
+        if (!PathsEqual(appFolder, installFolder))
         {
-            StartExecutable(cachedExecutable);
-            return true;
+            if (showLatest) MessageBox.Show("程序尚未迁移到固定安装目录，请重新打开软件后再检查更新。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
 
         Directory.CreateDirectory(localData);
@@ -216,46 +222,340 @@ internal static class Launcher
             return false;
         }
 
-        string versionName = remoteVersion.ToString();
-        string finalFolder = Path.Combine(versionsFolder, "v" + versionName);
-        if (IsValidInstalledVersion(finalFolder, remoteVersion))
-        {
-            if (AskToInstallUpdate(localVersion, remoteVersion))
-            {
-                StartExecutable(Path.Combine(finalFolder, "浮生弈.exe"));
-                return true;
-            }
-            return false;
-        }
-
         if (!AskToInstallUpdate(localVersion, remoteVersion)) return false;
 
+        string versionName = remoteVersion.ToString();
+        string updateFolder = Path.Combine(localData, "updates");
+        string stagingFolder = Path.Combine(updateFolder, "stage-v" + versionName + "-" + Guid.NewGuid().ToString("N"));
+        string helperPath = Path.Combine(updateFolder, "apply-update.exe");
         try
         {
-            string updateFolder = Path.Combine(localData, "updates");
             Directory.CreateDirectory(updateFolder);
-            string zipPath = Path.Combine(updateFolder, "fushengyi-v" + versionName + ".zip");
+            string zipPath = Path.Combine(updateFolder, "fushengyi-update.zip");
             DownloadFile(downloadUrl, zipPath, 30000);
             VerifySha256(zipPath, digest);
 
-            Directory.CreateDirectory(versionsFolder);
-            string stagingFolder = Path.Combine(versionsFolder, "stage-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(stagingFolder);
             ExtractPackage(zipPath, stagingFolder);
             if (!IsValidInstalledVersion(stagingFolder, remoteVersion))
                 throw new InvalidDataException("更新包中的版本号或程序文件不正确。");
 
-            if (Directory.Exists(finalFolder))
-                finalFolder = Path.Combine(versionsFolder, "v" + versionName + "-" + DateTime.UtcNow.Ticks.ToString());
-            Directory.Move(stagingFolder, finalFolder);
-            StartExecutable(Path.Combine(finalFolder, "浮生弈.exe"));
+            PreserveCustomImages(installFolder, stagingFolder);
+            File.Copy(Assembly.GetExecutingAssembly().Location, helperPath, true);
+            ProcessStartInfo helper = new ProcessStartInfo();
+            helper.FileName = helperPath;
+            helper.Arguments = "--apply-update " + QuoteArgument(stagingFolder) + " " + QuoteArgument(installFolder) + " " + versionName + " " + Process.GetCurrentProcess().Id.ToString();
+            helper.UseShellExecute = false;
+            if (Process.Start(helper) == null) throw new InvalidOperationException("无法启动更新辅助程序。");
             return true;
         }
         catch (Exception ex)
         {
+            try { if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
+            catch { }
+            try { if (File.Exists(helperPath)) File.Delete(helperPath); }
+            catch { }
             MessageBox.Show("更新没有完成，继续打开当前版本。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
+    }
+
+    private static bool EnsureCanonicalInstall(string sourceFolder, bool manualCheck, out string appFolder)
+    {
+        string localData = GetLocalDataFolder();
+        string installFolder = GetInstallFolder();
+        sourceFolder = Path.GetFullPath(sourceFolder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        installFolder = Path.GetFullPath(installFolder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (PathsEqual(sourceFolder, installFolder))
+        {
+            appFolder = installFolder;
+            return true;
+        }
+
+        Version sourceVersion = ParseVersion(ReadVersionText(sourceFolder));
+        Version installedVersion;
+        string installedVersionText = ReadVersionText(installFolder);
+        bool installedIsValid = Version.TryParse(installedVersionText, out installedVersion) &&
+            IsValidInstalledVersion(installFolder, installedVersion);
+        if (installedIsValid && installedVersion >= sourceVersion)
+        {
+            appFolder = installFolder;
+            StartExecutable(Path.Combine(installFolder, "浮生弈.exe"), manualCheck ? "--check-update" : null);
+            return false;
+        }
+
+        Directory.CreateDirectory(localData);
+        string stagingFolder = Path.Combine(localData, "migration-stage-" + Guid.NewGuid().ToString("N"));
+        string backupFolder = Path.Combine(localData, "app-backup-" + DateTime.UtcNow.Ticks.ToString());
+        bool movedOldInstall = false;
+        bool movedNewInstall = false;
+        try
+        {
+            CopyDirectory(sourceFolder, stagingFolder);
+            if (!IsValidInstalledVersion(stagingFolder, sourceVersion))
+                throw new InvalidDataException("当前程序文件不完整，无法迁移到固定安装目录。");
+
+            PreserveCustomImages(sourceFolder, stagingFolder);
+            string previousVersionFolder = FindPreviousVersionFolder(sourceFolder, sourceVersion);
+            PreserveCustomImages(previousVersionFolder, stagingFolder);
+            if (Directory.Exists(installFolder)) PreserveCustomImages(installFolder, stagingFolder);
+
+            if (Directory.Exists(installFolder))
+            {
+                Directory.Move(installFolder, backupFolder);
+                movedOldInstall = true;
+            }
+            Directory.Move(stagingFolder, installFolder);
+            movedNewInstall = true;
+            if (!IsValidInstalledVersion(installFolder, sourceVersion))
+                throw new InvalidDataException("迁移后的程序文件校验失败。");
+
+            appFolder = installFolder;
+            return true;
+        }
+        catch
+        {
+            try
+            {
+                if (movedNewInstall && Directory.Exists(installFolder))
+                    Directory.Move(installFolder, stagingFolder + ".failed");
+            }
+            catch { }
+            try
+            {
+                if (movedOldInstall && Directory.Exists(backupFolder) && !Directory.Exists(installFolder))
+                    Directory.Move(backupFolder, installFolder);
+            }
+            catch { }
+            try { if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
+            catch { }
+            throw;
+        }
+    }
+
+    private static int ApplyStagedUpdate(string[] args)
+    {
+        string stagingFolder = null;
+        try
+        {
+            if (args.Length < 5) throw new ArgumentException("更新参数不完整。");
+            stagingFolder = Path.GetFullPath(args[1]);
+            string installFolder = Path.GetFullPath(args[2]);
+            Version expectedVersion;
+            int parentProcessId;
+            if (!Version.TryParse(args[3], out expectedVersion) || !Int32.TryParse(args[4], out parentProcessId))
+                throw new ArgumentException("更新版本或进程参数无效。");
+
+            string localData = GetLocalDataFolder();
+            string updatesFolder = Path.Combine(localData, "updates");
+            if (!PathsEqual(installFolder, GetInstallFolder()) || !IsChildPath(updatesFolder, stagingFolder))
+                throw new InvalidDataException("更新目录不在允许的位置。");
+            if (!IsValidInstalledVersion(stagingFolder, expectedVersion))
+                throw new InvalidDataException("临时更新包中的程序文件不完整。");
+
+            try
+            {
+                using (Process parent = Process.GetProcessById(parentProcessId))
+                {
+                    if (!parent.WaitForExit(30000))
+                        throw new TimeoutException("更新程序未能正常退出。");
+                }
+            }
+            catch (ArgumentException) { }
+
+            DialogResult closeResult = MessageBox.Show(
+                "新版已经下载并验证。请先关闭所有打开的浮生弈窗口，再点击“确定”替换本地程序并重启。",
+                "浮生弈更新", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
+            if (closeResult != DialogResult.OK)
+            {
+                if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true);
+                return 0;
+            }
+
+            string backupFolder = Path.Combine(updatesFolder, "backup-v" + expectedVersion + "-" + Guid.NewGuid().ToString("N"));
+            bool movedOldInstall = false;
+            bool movedNewInstall = false;
+            try
+            {
+                if (Directory.Exists(installFolder))
+                {
+                    Directory.Move(installFolder, backupFolder);
+                    movedOldInstall = true;
+                }
+                Directory.Move(stagingFolder, installFolder);
+                movedNewInstall = true;
+                if (!IsValidInstalledVersion(installFolder, expectedVersion))
+                    throw new InvalidDataException("替换后的程序文件校验失败。");
+
+                StartExecutable(Path.Combine(installFolder, "浮生弈.exe"));
+                if (movedOldInstall && Directory.Exists(backupFolder))
+                {
+                    try { Directory.Delete(backupFolder, true); }
+                    catch { }
+                }
+                CleanupLegacyVersions();
+                return 0;
+            }
+            catch
+            {
+                try
+                {
+                    if (movedNewInstall && Directory.Exists(installFolder))
+                        Directory.Move(installFolder, Path.Combine(updatesFolder, "failed-" + Guid.NewGuid().ToString("N")));
+                }
+                catch { }
+                try
+                {
+                    if (movedOldInstall && Directory.Exists(backupFolder) && !Directory.Exists(installFolder))
+                        Directory.Move(backupFolder, installFolder);
+                }
+                catch { }
+                if (Directory.Exists(installFolder))
+                {
+                    try { StartExecutable(Path.Combine(installFolder, "浮生弈.exe")); }
+                    catch { }
+                }
+                throw;
+            }
+        }
+        catch (Exception ex)
+        {
+            try { if (stagingFolder != null && Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
+            catch { }
+            MessageBox.Show("本地替换没有完成，旧版本已保留或恢复。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return 1;
+        }
+    }
+
+    private static bool HasArgument(string[] args, string argument)
+    {
+        return args != null && Array.IndexOf(args, argument) >= 0;
+    }
+
+    private static string GetLocalDataFolder()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
+    }
+
+    private static string GetInstallFolder()
+    {
+        return Path.Combine(GetLocalDataFolder(), "app");
+    }
+
+    private static string GetUserImagesFolder()
+    {
+        return Path.Combine(GetLocalDataFolder(), "data", "images");
+    }
+
+    private static void CleanupLegacyVersions()
+    {
+        string localData = GetLocalDataFolder();
+        string versionsFolder = Path.Combine(localData, "versions");
+        if (!Directory.Exists(versionsFolder) || !IsChildPath(localData, versionsFolder)) return;
+        try { Directory.Delete(versionsFolder, true); }
+        catch { }
+    }
+
+    private static Version ParseVersion(string value)
+    {
+        Version version;
+        return Version.TryParse(value, out version) ? version : new Version(1, 0, 0);
+    }
+
+    private static bool PathsEqual(string first, string second)
+    {
+        if (String.IsNullOrWhiteSpace(first) || String.IsNullOrWhiteSpace(second)) return false;
+        string a = Path.GetFullPath(first).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string b = Path.GetFullPath(second).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return String.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsChildPath(string parent, string candidate)
+    {
+        string root = Path.GetFullPath(parent).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        string path = Path.GetFullPath(candidate);
+        return path.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string QuoteArgument(string value)
+    {
+        return "\"" + value + "\"";
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string file in Directory.GetFiles(source))
+            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), true);
+        foreach (string directory in Directory.GetDirectories(source))
+            CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+    }
+
+    private static string FindPreviousVersionFolder(string sourceFolder, Version currentVersion)
+    {
+        DirectoryInfo parent = Directory.GetParent(Path.GetFullPath(sourceFolder.TrimEnd(Path.DirectorySeparatorChar)));
+        if (parent == null || !String.Equals(parent.Name, "versions", StringComparison.OrdinalIgnoreCase)) return null;
+        string bestFolder = null;
+        Version bestVersion = new Version(0, 0, 0);
+        foreach (string folder in Directory.GetDirectories(parent.FullName))
+        {
+            Version candidate;
+            if (!Version.TryParse(ReadVersionText(folder), out candidate) || candidate >= currentVersion || candidate <= bestVersion) continue;
+            if (Directory.Exists(Path.Combine(folder, "images")))
+            {
+                bestFolder = folder;
+                bestVersion = candidate;
+            }
+        }
+        return bestFolder;
+    }
+
+    private static HashSet<string> ReadManagedImageNames(string packageFolder)
+    {
+        HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string manifest = Path.Combine(packageFolder, "managed-images.txt");
+        if (File.Exists(manifest))
+            foreach (string line in File.ReadAllLines(manifest, Encoding.UTF8))
+                if (!String.IsNullOrWhiteSpace(line)) names.Add(Path.GetFileName(line.Trim()));
+        string imageFolder = Path.Combine(packageFolder, "images");
+        if (Directory.Exists(imageFolder))
+            foreach (string file in Directory.GetFiles(imageFolder)) names.Add(Path.GetFileName(file));
+        return names;
+    }
+
+    private static void PreserveCustomImages(string oldPackageFolder, string newPackageFolder)
+    {
+        if (String.IsNullOrWhiteSpace(oldPackageFolder) || !Directory.Exists(oldPackageFolder)) return;
+        string oldImages = Path.Combine(oldPackageFolder, "images");
+        if (!Directory.Exists(oldImages)) return;
+        HashSet<string> managedNames = ReadManagedImageNames(newPackageFolder);
+        string userImages = GetUserImagesFolder();
+        foreach (string file in Directory.GetFiles(oldImages))
+        {
+            if (!IsSupportedImage(file)) continue;
+            string name = Path.GetFileName(file);
+            if (managedNames.Contains(name) || File.Exists(Path.Combine(newPackageFolder, "images", name))) continue;
+            Directory.CreateDirectory(userImages);
+            string destination = Path.Combine(userImages, name);
+            File.Copy(file, destination, true);
+        }
+    }
+
+    private static void AddImageFiles(string folder, List<string> output, HashSet<string> names)
+    {
+        if (!Directory.Exists(folder)) return;
+        foreach (string file in Directory.GetFiles(folder))
+        {
+            if (!IsSupportedImage(file)) continue;
+            if (names.Add(Path.GetFileName(file))) output.Add(file);
+        }
+    }
+
+    private static bool IsSupportedImage(string file)
+    {
+        string extension = Path.GetExtension(file).ToLowerInvariant();
+        return extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
+            extension == ".gif" || extension == ".webp" || extension == ".bmp";
     }
 
     private static string ReadJsonString(Dictionary<string, object> values, string key)
@@ -278,25 +578,6 @@ internal static class Launcher
         return File.Exists(path) ? File.ReadAllText(path, Encoding.UTF8).Trim() : "1.0.0";
     }
 
-    private static string FindCachedVersion(string versionsFolder, Version currentVersion)
-    {
-        if (!Directory.Exists(versionsFolder)) return null;
-        string bestPath = null;
-        Version bestVersion = currentVersion;
-        foreach (string folder in Directory.GetDirectories(versionsFolder))
-        {
-            if (!Path.GetFileName(folder).StartsWith("v", StringComparison.OrdinalIgnoreCase)) continue;
-            Version candidate;
-            if (!Version.TryParse(ReadVersionText(folder), out candidate) || candidate <= bestVersion) continue;
-            if (File.Exists(Path.Combine(folder, "浮生弈.exe")))
-            {
-                bestVersion = candidate;
-                bestPath = Path.Combine(folder, "浮生弈.exe");
-            }
-        }
-        return bestPath;
-    }
-
     private static bool IsValidInstalledVersion(string folder, Version expected)
     {
         Version installed;
@@ -306,7 +587,7 @@ internal static class Launcher
 
     private static bool AskToInstallUpdate(Version current, Version latest)
     {
-        string message = "发现新版本 " + latest + "（当前版本 " + current + "）。\r\n\r\n现在下载并启动更新吗？";
+        string message = "发现新版本 " + latest + "（当前版本 " + current + "）。\r\n\r\n现在下载并替换本地程序吗？替换前会提示你关闭软件窗口。";
         return MessageBox.Show(message, "浮生弈更新", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes;
     }
 
@@ -434,7 +715,15 @@ internal static class Launcher
 
     private static void StartExecutable(string path)
     {
-        Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        StartExecutable(path, null);
+    }
+
+    private static void StartExecutable(string path, string arguments)
+    {
+        ProcessStartInfo start = new ProcessStartInfo(path);
+        start.UseShellExecute = true;
+        if (!String.IsNullOrWhiteSpace(arguments)) start.Arguments = arguments;
+        Process.Start(start);
     }
 
     private static string EscapeJson(string value)
