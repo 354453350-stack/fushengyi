@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -15,6 +16,23 @@ using System.Windows.Forms;
 internal static class Launcher
 {
     private const string AppName = "FuShengYi";
+
+    private sealed class UpdateSource
+    {
+        public string Host;
+        public string Owner;
+        public string Repository;
+        public string AssetName;
+    }
+
+    private sealed class UpdateCandidate
+    {
+        public UpdateSource Source;
+        public string Tag;
+        public string DownloadUrl;
+        public string Digest;
+        public Version Version;
+    }
 
     [STAThread]
     private static int Main(string[] args)
@@ -137,25 +155,20 @@ internal static class Launcher
             return false;
         }
 
-        string owner;
-        string repository;
-        string assetName;
+        List<UpdateSource> sources;
         try
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             Dictionary<string, object> config = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(configPath, Encoding.UTF8));
-            owner = ReadJsonString(config, "owner");
-            repository = ReadJsonString(config, "repository");
-            assetName = ReadJsonString(config, "assetName");
+            sources = ReadUpdateSources(config);
         }
         catch { return false; }
 
-        if (!IsGitHubName(owner) || !IsGitHubName(repository))
+        if (sources.Count == 0)
         {
             if (showLatest) MessageBox.Show("更新源配置无效，请重新下载完整版本。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
-        if (String.IsNullOrWhiteSpace(assetName)) assetName = "fushengyi-win-x64.zip";
 
         string localVersionText = ReadVersionText(appFolder);
         Version localVersion;
@@ -185,85 +198,101 @@ internal static class Launcher
         try { File.WriteAllText(checkPath, DateTime.UtcNow.ToString("o")); }
         catch { }
 
-        string tag;
-        try
+        List<UpdateCandidate> candidates = new List<UpdateCandidate>();
+        bool checkedAnySource = false;
+        string lastError = null;
+        foreach (UpdateSource source in sources)
         {
-            tag = RequestLatestReleaseTag(owner, repository, 10000);
+            try
+            {
+                string tag = RequestLatestReleaseTag(source, 10000);
+                checkedAnySource = true;
+                Version remoteVersion;
+                if (!Version.TryParse(tag.TrimStart('v', 'V'), out remoteVersion))
+                    throw new InvalidDataException("更新服务器返回了无法识别的版本号。");
+                if (remoteVersion <= localVersion) continue;
+
+                string downloadUrl = "https://" + source.Host + "/" + source.Owner + "/" + source.Repository +
+                    "/releases/download/" + Uri.EscapeDataString(tag) + "/" + Uri.EscapeDataString(source.AssetName);
+                string digest = RequestReleaseDigest(downloadUrl + ".sha256", source.AssetName, 10000);
+                UpdateCandidate candidate = new UpdateCandidate();
+                candidate.Source = source;
+                candidate.Tag = tag;
+                candidate.DownloadUrl = downloadUrl;
+                candidate.Digest = digest;
+                candidate.Version = remoteVersion;
+                candidates.Add(candidate);
+            }
+            catch (Exception ex)
+            {
+                lastError = ex.Message;
+            }
         }
-        catch (Exception ex)
+
+        if (candidates.Count == 0)
         {
             if (showLatest)
-                MessageBox.Show("暂时无法连接更新服务器，请检查网络后重试。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            {
+                if (checkedAnySource)
+                    MessageBox.Show("当前已经是最新版本（v" + localVersion + "）。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                else
+                    MessageBox.Show("暂时无法连接更新服务器，请检查网络后重试。" + (String.IsNullOrEmpty(lastError) ? "" : "\r\n\r\n" + lastError), "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
             return false;
         }
 
-        Version remoteVersion;
-        if (!Version.TryParse(tag.TrimStart('v', 'V'), out remoteVersion))
-        {
-            if (showLatest) MessageBox.Show("暂时无法识别服务器上的版本号。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return false;
-        }
-        if (remoteVersion <= localVersion)
-        {
-            if (showLatest) MessageBox.Show("当前已经是最新版本（v" + localVersion + "）。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return false;
-        }
+        Version latestVersion = candidates[0].Version;
+        foreach (UpdateCandidate candidate in candidates)
+            if (candidate.Version > latestVersion) latestVersion = candidate.Version;
 
-        string releaseBase = "https://github.com/" + owner + "/" + repository + "/releases/download/" + Uri.EscapeDataString(tag) + "/";
-        string downloadUrl = releaseBase + Uri.EscapeDataString(assetName);
-        string digest;
-        try
-        {
-            digest = RequestReleaseDigest(downloadUrl + ".sha256", assetName, 10000);
-        }
-        catch (Exception ex)
-        {
-            if (showLatest)
-                MessageBox.Show("发现新版本 v" + remoteVersion + "，但暂时无法读取安装包校验文件。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return false;
-        }
+        if (!AskToInstallUpdate(localVersion, latestVersion)) return false;
 
-        if (!AskToInstallUpdate(localVersion, remoteVersion)) return false;
-
-        string versionName = remoteVersion.ToString();
         string updateFolder = Path.Combine(localData, "updates");
-        string updateId = Guid.NewGuid().ToString("N");
-        string stagingFolder = Path.Combine(updateFolder, "stage-v" + versionName + "-" + updateId);
-        string zipPath = Path.Combine(updateFolder, "fushengyi-update-" + updateId + ".zip");
-        string helperPath = Path.Combine(updateFolder, "apply-update-" + updateId + ".exe");
-        try
+        foreach (UpdateCandidate candidate in candidates)
         {
-            Directory.CreateDirectory(updateFolder);
-            DownloadFile(downloadUrl, zipPath, 30000);
-            VerifySha256(zipPath, digest);
+            if (candidate.Version != latestVersion) continue;
+            string updateId = Guid.NewGuid().ToString("N");
+            string stagingFolder = Path.Combine(updateFolder, "stage-v" + candidate.Version + "-" + updateId);
+            string zipPath = Path.Combine(updateFolder, "fushengyi-update-" + updateId + ".zip");
+            string helperPath = Path.Combine(updateFolder, "apply-update-" + updateId + ".exe");
+            try
+            {
+                Directory.CreateDirectory(updateFolder);
+                DownloadFile(candidate.DownloadUrl, zipPath, 30000);
+                VerifySha256(zipPath, candidate.Digest);
 
-            Directory.CreateDirectory(stagingFolder);
-            ExtractPackage(zipPath, stagingFolder);
-            if (!IsValidInstalledVersion(stagingFolder, remoteVersion))
-                throw new InvalidDataException("更新包中的版本号或程序文件不正确。");
-            try { File.Delete(zipPath); }
-            catch { }
+                Directory.CreateDirectory(stagingFolder);
+                ExtractPackage(zipPath, stagingFolder);
+                if (!IsValidInstalledVersion(stagingFolder, candidate.Version))
+                    throw new InvalidDataException("更新包中的版本号或程序文件不正确。");
+                try { File.Delete(zipPath); }
+                catch { }
 
-            PreserveCustomImages(installFolder, stagingFolder);
-            File.Copy(Assembly.GetExecutingAssembly().Location, helperPath, true);
-            ProcessStartInfo helper = new ProcessStartInfo();
-            helper.FileName = helperPath;
-            helper.Arguments = "--apply-update " + QuoteArgument(stagingFolder) + " " + QuoteArgument(installFolder) + " " + versionName + " " + Process.GetCurrentProcess().Id.ToString();
-            helper.UseShellExecute = false;
-            if (Process.Start(helper) == null) throw new InvalidOperationException("无法启动更新辅助程序。");
-            return true;
+                PreserveCustomImages(installFolder, stagingFolder);
+                File.Copy(Assembly.GetExecutingAssembly().Location, helperPath, true);
+                ProcessStartInfo helper = new ProcessStartInfo();
+                helper.FileName = helperPath;
+                helper.Arguments = "--apply-update " + QuoteArgument(stagingFolder) + " " + QuoteArgument(installFolder) + " " + candidate.Version.ToString() + " " + Process.GetCurrentProcess().Id.ToString();
+                helper.UseShellExecute = false;
+                if (Process.Start(helper) == null) throw new InvalidOperationException("无法启动更新辅助程序。");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex.Message;
+                try { if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
+                catch { }
+                try { if (File.Exists(zipPath)) File.Delete(zipPath); }
+                catch { }
+                try { if (File.Exists(helperPath)) File.Delete(helperPath); }
+                catch { }
+            }
         }
-        catch (Exception ex)
-        {
-            try { if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
-            catch { }
-            try { if (File.Exists(zipPath)) File.Delete(zipPath); }
-            catch { }
-            try { if (File.Exists(helperPath)) File.Delete(helperPath); }
-            catch { }
-            MessageBox.Show("更新没有完成，继续打开当前版本。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return false;
-        }
+
+        if (showLatest)
+            MessageBox.Show("发现新版本 v" + latestVersion + "，但无法完成下载或校验；继续使用当前版本。" +
+                (String.IsNullOrEmpty(lastError) ? "" : "\r\n\r\n" + lastError), "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return false;
     }
 
     private static bool EnsureCanonicalInstall(string sourceFolder, bool manualCheck, out string appFolder)
@@ -605,6 +634,56 @@ internal static class Launcher
         return values != null && values.TryGetValue(key, out value) && value != null ? Convert.ToString(value) : String.Empty;
     }
 
+    private static List<UpdateSource> ReadUpdateSources(Dictionary<string, object> config)
+    {
+        List<UpdateSource> sources = new List<UpdateSource>();
+        object configuredSources;
+        ArrayList sourceList = config != null && config.TryGetValue("updateSources", out configuredSources) ? configuredSources as ArrayList : null;
+        if (sourceList != null)
+        {
+            foreach (object item in sourceList)
+            {
+                Dictionary<string, object> values = item as Dictionary<string, object>;
+                if (values == null) continue;
+                UpdateSource source = new UpdateSource();
+                source.Host = ReadJsonString(values, "host").ToLowerInvariant();
+                source.Owner = ReadJsonString(values, "owner");
+                source.Repository = ReadJsonString(values, "repository");
+                source.AssetName = ReadJsonString(values, "assetName");
+                if (String.IsNullOrWhiteSpace(source.AssetName)) source.AssetName = "fushengyi-win-x64.zip";
+                if (IsValidUpdateSource(source) && !ContainsUpdateSource(sources, source)) sources.Add(source);
+            }
+        }
+
+        UpdateSource legacySource = new UpdateSource();
+        legacySource.Host = "github.com";
+        legacySource.Owner = ReadJsonString(config, "owner");
+        legacySource.Repository = ReadJsonString(config, "repository");
+        legacySource.AssetName = ReadJsonString(config, "assetName");
+        if (String.IsNullOrWhiteSpace(legacySource.AssetName)) legacySource.AssetName = "fushengyi-win-x64.zip";
+        if (IsValidUpdateSource(legacySource) && !ContainsUpdateSource(sources, legacySource)) sources.Add(legacySource);
+        return sources;
+    }
+
+    private static bool ContainsUpdateSource(List<UpdateSource> sources, UpdateSource candidate)
+    {
+        foreach (UpdateSource source in sources)
+            if (String.Equals(source.Host, candidate.Host, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(source.Owner, candidate.Owner, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(source.Repository, candidate.Repository, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    private static bool IsValidUpdateSource(UpdateSource source)
+    {
+        return source != null &&
+            (String.Equals(source.Host, "gitee.com", StringComparison.OrdinalIgnoreCase) ||
+             String.Equals(source.Host, "github.com", StringComparison.OrdinalIgnoreCase)) &&
+            IsGitHubName(source.Owner) && IsGitHubName(source.Repository) &&
+            !String.IsNullOrWhiteSpace(source.AssetName) &&
+            source.AssetName.IndexOf('/') < 0 && source.AssetName.IndexOf('\\') < 0;
+    }
+
     private static bool IsGitHubName(string value)
     {
         if (String.IsNullOrWhiteSpace(value) || value == "OWNER" || value == "REPOSITORY") return false;
@@ -646,10 +725,10 @@ internal static class Launcher
             return reader.ReadToEnd();
     }
 
-    private static string RequestLatestReleaseTag(string owner, string repository, int timeout)
+    private static string RequestLatestReleaseTag(UpdateSource source, int timeout)
     {
         ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
-        string url = "https://github.com/" + owner + "/" + repository + "/releases/latest";
+        string url = "https://" + source.Host + "/" + source.Owner + "/" + source.Repository + "/releases/latest";
         HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
         request.Method = "GET";
         request.Accept = "text/html";
@@ -659,24 +738,31 @@ internal static class Launcher
         using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
         {
             Uri finalUri = response.ResponseUri;
-            if (!String.Equals(finalUri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("GitHub 返回的更新页面地址无效。");
+            if (!String.Equals(finalUri.Host, source.Host, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("更新服务器返回的地址无效。");
 
             string[] segments = finalUri.AbsolutePath.Split(new char[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-            if (segments.Length != 5 ||
-                !String.Equals(segments[0], owner, StringComparison.OrdinalIgnoreCase) ||
-                !String.Equals(segments[1], repository, StringComparison.OrdinalIgnoreCase) ||
-                !String.Equals(segments[2], "releases", StringComparison.OrdinalIgnoreCase) ||
-                !String.Equals(segments[3], "tag", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("GitHub 没有返回有效的最新 Release 页面。");
+            if (segments.Length < 4 ||
+                !String.Equals(segments[0], source.Owner, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(segments[1], source.Repository, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(segments[2], "releases", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("更新服务器没有返回有效的最新 Release 页面。");
 
-            return Uri.UnescapeDataString(segments[4]);
+            if (segments.Length == 5 && String.Equals(segments[3], "tag", StringComparison.OrdinalIgnoreCase))
+                return Uri.UnescapeDataString(segments[4]);
+            if (segments.Length == 4)
+                return Uri.UnescapeDataString(segments[3]);
+            throw new InvalidDataException("更新服务器返回的 Release 标签地址无效。");
         }
     }
 
     private static string RequestReleaseDigest(string url, string assetName, int timeout)
     {
-        if (String.IsNullOrWhiteSpace(url) || !url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase))
+        Uri uri;
+        if (String.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out uri) ||
+            !String.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase) ||
+            (!String.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase) &&
+             !String.Equals(uri.Host, "gitee.com", StringComparison.OrdinalIgnoreCase)))
             throw new InvalidDataException("新版本校验文件地址无效。");
 
         string[] lines = RequestText(url, timeout).Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);

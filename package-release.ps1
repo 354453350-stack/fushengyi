@@ -6,7 +6,11 @@ param(
     [string]$GitHubOwner,
 
     [Parameter(Mandatory = $true)]
-    [string]$GitHubRepository
+    [string]$GitHubRepository,
+
+    [string]$GiteeOwner = 'n11212_0',
+
+    [string]$GiteeRepository = 'kisswith-suzuran'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     throw 'Version must use MAJOR.MINOR.PATCH, such as 1.0.0.'
 }
-foreach ($name in @($GitHubOwner, $GitHubRepository)) {
+foreach ($name in @($GitHubOwner, $GitHubRepository, $GiteeOwner, $GiteeRepository)) {
     if ($name -notmatch '^[A-Za-z0-9_.-]+$') {
         throw "Invalid GitHub owner or repository name: $name"
     }
@@ -74,6 +78,20 @@ $updateConfig = [ordered]@{
     owner = $GitHubOwner
     repository = $GitHubRepository
     assetName = 'fushengyi-win-x64.zip'
+    updateSources = @(
+        [ordered]@{
+            host = 'gitee.com'
+            owner = $GiteeOwner
+            repository = $GiteeRepository
+            assetName = 'fushengyi-win-x64.zip'
+        },
+        [ordered]@{
+            host = 'github.com'
+            owner = $GitHubOwner
+            repository = $GitHubRepository
+            assetName = 'fushengyi-win-x64.zip'
+        }
+    )
 }
 $updateConfig | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'update-config.json') -Encoding utf8NoBOM
 

@@ -38,7 +38,12 @@ jobs:
             throw 'Use a release tag like v1.0.0.'
           }
           $repositoryName = $env:GITHUB_REPOSITORY.Split('/')[1]
-          ./package-release.ps1 -Version $version -GitHubOwner $env:REPOSITORY_OWNER -GitHubRepository $repositoryName
+          ./package-release.ps1 `
+            -Version $version `
+            -GitHubOwner $env:REPOSITORY_OWNER `
+            -GitHubRepository $repositoryName `
+            -GiteeOwner n11212_0 `
+            -GiteeRepository kisswith-suzuran
 
       - name: Publish GitHub Release
         shell: pwsh
