@@ -8,6 +8,7 @@ using System.Reflection;
 using Microsoft.Win32;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -226,12 +227,13 @@ internal static class Launcher
 
         string versionName = remoteVersion.ToString();
         string updateFolder = Path.Combine(localData, "updates");
-        string stagingFolder = Path.Combine(updateFolder, "stage-v" + versionName + "-" + Guid.NewGuid().ToString("N"));
-        string helperPath = Path.Combine(updateFolder, "apply-update.exe");
+        string updateId = Guid.NewGuid().ToString("N");
+        string stagingFolder = Path.Combine(updateFolder, "stage-v" + versionName + "-" + updateId);
+        string zipPath = Path.Combine(updateFolder, "fushengyi-update-" + updateId + ".zip");
+        string helperPath = Path.Combine(updateFolder, "apply-update-" + updateId + ".exe");
         try
         {
             Directory.CreateDirectory(updateFolder);
-            string zipPath = Path.Combine(updateFolder, "fushengyi-update.zip");
             DownloadFile(downloadUrl, zipPath, 30000);
             VerifySha256(zipPath, digest);
 
@@ -239,6 +241,8 @@ internal static class Launcher
             ExtractPackage(zipPath, stagingFolder);
             if (!IsValidInstalledVersion(stagingFolder, remoteVersion))
                 throw new InvalidDataException("更新包中的版本号或程序文件不正确。");
+            try { File.Delete(zipPath); }
+            catch { }
 
             PreserveCustomImages(installFolder, stagingFolder);
             File.Copy(Assembly.GetExecutingAssembly().Location, helperPath, true);
@@ -252,6 +256,8 @@ internal static class Launcher
         catch (Exception ex)
         {
             try { if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
+            catch { }
+            try { if (File.Exists(zipPath)) File.Delete(zipPath); }
             catch { }
             try { if (File.Exists(helperPath)) File.Delete(helperPath); }
             catch { }
@@ -363,59 +369,27 @@ internal static class Launcher
             }
             catch (ArgumentException) { }
 
-            DialogResult closeResult = MessageBox.Show(
-                "新版已经下载并验证。请先关闭所有打开的浮生弈窗口，再点击“确定”替换本地程序并重启。",
-                "浮生弈更新", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
-            if (closeResult != DialogResult.OK)
+            using (Mutex updateMutex = new Mutex(false, @"Local\FuShengYiUpdate"))
             {
-                if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true);
-                return 0;
-            }
-
-            string backupFolder = Path.Combine(updatesFolder, "backup-v" + expectedVersion + "-" + Guid.NewGuid().ToString("N"));
-            bool movedOldInstall = false;
-            bool movedNewInstall = false;
-            try
-            {
-                if (Directory.Exists(installFolder))
-                {
-                    Directory.Move(installFolder, backupFolder);
-                    movedOldInstall = true;
-                }
-                Directory.Move(stagingFolder, installFolder);
-                movedNewInstall = true;
-                if (!IsValidInstalledVersion(installFolder, expectedVersion))
-                    throw new InvalidDataException("替换后的程序文件校验失败。");
-
-                StartExecutable(Path.Combine(installFolder, "浮生弈.exe"));
-                if (movedOldInstall && Directory.Exists(backupFolder))
-                {
-                    try { Directory.Delete(backupFolder, true); }
-                    catch { }
-                }
-                CleanupLegacyVersions();
-                return 0;
-            }
-            catch
-            {
+                bool ownsMutex = false;
                 try
                 {
-                    if (movedNewInstall && Directory.Exists(installFolder))
-                        Directory.Move(installFolder, Path.Combine(updatesFolder, "failed-" + Guid.NewGuid().ToString("N")));
+                    try { ownsMutex = updateMutex.WaitOne(0); }
+                    catch (AbandonedMutexException) { ownsMutex = true; }
+                    if (!ownsMutex)
+                    {
+                        try { if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
+                        catch { }
+                        MessageBox.Show("另一个更新程序正在处理，请等待当前更新完成。", "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return 0;
+                    }
+
+                    return ApplyStagedUpdateLocked(stagingFolder, installFolder, expectedVersion);
                 }
-                catch { }
-                try
+                finally
                 {
-                    if (movedOldInstall && Directory.Exists(backupFolder) && !Directory.Exists(installFolder))
-                        Directory.Move(backupFolder, installFolder);
+                    if (ownsMutex) updateMutex.ReleaseMutex();
                 }
-                catch { }
-                if (Directory.Exists(installFolder))
-                {
-                    try { StartExecutable(Path.Combine(installFolder, "浮生弈.exe")); }
-                    catch { }
-                }
-                throw;
             }
         }
         catch (Exception ex)
@@ -424,6 +398,73 @@ internal static class Launcher
             catch { }
             MessageBox.Show("本地替换没有完成，旧版本已保留或恢复。\r\n\r\n" + ex.Message, "浮生弈更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return 1;
+        }
+    }
+
+    private static int ApplyStagedUpdateLocked(string stagingFolder, string installFolder, Version expectedVersion)
+    {
+        Version installedVersion;
+        if (Version.TryParse(ReadVersionText(installFolder), out installedVersion) && installedVersion >= expectedVersion)
+        {
+            try { if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true); }
+            catch { }
+            return 0;
+        }
+
+        DialogResult closeResult = MessageBox.Show(
+            "新版已经下载并验证。请先关闭所有打开的浮生弈窗口，再点击“确定”替换本地程序并重启。",
+            "浮生弈更新", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
+        if (closeResult != DialogResult.OK)
+        {
+            if (Directory.Exists(stagingFolder)) Directory.Delete(stagingFolder, true);
+            return 0;
+        }
+
+        string updatesFolder = Path.Combine(GetLocalDataFolder(), "updates");
+        string backupFolder = Path.Combine(updatesFolder, "backup-v" + expectedVersion + "-" + Guid.NewGuid().ToString("N"));
+        bool movedOldInstall = false;
+        bool movedNewInstall = false;
+        try
+        {
+            if (Directory.Exists(installFolder))
+            {
+                Directory.Move(installFolder, backupFolder);
+                movedOldInstall = true;
+            }
+            Directory.Move(stagingFolder, installFolder);
+            movedNewInstall = true;
+            if (!IsValidInstalledVersion(installFolder, expectedVersion))
+                throw new InvalidDataException("替换后的程序文件校验失败。");
+
+            StartExecutable(Path.Combine(installFolder, "浮生弈.exe"));
+            if (movedOldInstall && Directory.Exists(backupFolder))
+            {
+                try { Directory.Delete(backupFolder, true); }
+                catch { }
+            }
+            CleanupLegacyVersions();
+            return 0;
+        }
+        catch
+        {
+            try
+            {
+                if (movedNewInstall && Directory.Exists(installFolder))
+                    Directory.Move(installFolder, Path.Combine(updatesFolder, "failed-" + Guid.NewGuid().ToString("N")));
+            }
+            catch { }
+            try
+            {
+                if (movedOldInstall && Directory.Exists(backupFolder) && !Directory.Exists(installFolder))
+                    Directory.Move(backupFolder, installFolder);
+            }
+            catch { }
+            if (Directory.Exists(installFolder))
+            {
+                try { StartExecutable(Path.Combine(installFolder, "浮生弈.exe")); }
+                catch { }
+            }
+            throw;
         }
     }
 
@@ -671,7 +712,7 @@ internal static class Launcher
         request.ReadWriteTimeout = timeout;
         using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
         using (Stream input = response.GetResponseStream())
-        using (FileStream output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (FileStream output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             input.CopyTo(output);
     }
 
